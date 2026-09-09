@@ -11,12 +11,13 @@ test.beforeEach(() => {
   resetDemoState();
 });
 
-test('demo backend exposes chat, admin and Telegram fixture data', async () => {
-  const [site, session, bootstrap, overview, telegram] = await Promise.all([
+test('demo backend exposes chat, admin, storage and Telegram fixture data', async () => {
+  const [site, session, bootstrap, overview, storage, telegram] = await Promise.all([
     requestDemo('/site'),
     requestDemo('/auth/session'),
     requestDemo('/bootstrap'),
     requestDemo('/admin/overview'),
+    requestDemo('/admin/storage/scan'),
     requestDemo('/admin/telegram')
   ]);
 
@@ -25,6 +26,8 @@ test('demo backend exposes chat, admin and Telegram fixture data', async () => {
   assert.equal(bootstrap.channels.some((channel) => channel.isGeneral), true);
   assert.equal(bootstrap.dms.length, 1);
   assert.equal(overview.channels.length, 4);
+  assert.equal(storage.scannedObjects, 4);
+  assert.equal(storage.items.some((item) => item.ownerType === 'telegram'), true);
   assert.equal(telegram.config.configured, true);
   assert.equal(telegram.mappings[0].enabled, true);
 });
@@ -32,7 +35,7 @@ test('demo backend exposes chat, admin and Telegram fixture data', async () => {
 test('demo backend keeps group and admin mutations in browser memory', async () => {
   const created = await requestDemo('/channels', {
     method: 'POST',
-    body: { name: '演示项目组', memberUserIds: [2] }
+    body: { name: '演示项目组', kind: 'private', memberUserIds: [2] }
   });
   const invited = await requestDemo(`/channels/${created.channel.id}/invite`, {
     method: 'POST',
@@ -53,6 +56,30 @@ test('demo backend keeps group and admin mutations in browser memory', async () 
   assert.equal(invite.invite.remainingUses, 2);
 });
 
+test('demo admin supports temporary bans, permanent bans and unbanning', async () => {
+  const temporary = await requestDemo('/admin/users/2', {
+    method: 'PATCH',
+    body: { isDisabled: true, banDurationMinutes: 90 }
+  });
+  assert.equal(temporary.user.isDisabled, true);
+  assert.equal(temporary.user.isPermanentlyDisabled, false);
+  assert.ok(Date.parse(temporary.user.disabledUntil) > Date.now());
+
+  const permanent = await requestDemo('/admin/users/3', {
+    method: 'PATCH',
+    body: { isDisabled: true, banDurationMinutes: null }
+  });
+  assert.equal(permanent.user.isPermanentlyDisabled, true);
+  assert.equal(permanent.user.disabledUntil, null);
+
+  const enabled = await requestDemo('/admin/users/2', {
+    method: 'PATCH',
+    body: { isDisabled: false }
+  });
+  assert.equal(enabled.user.isDisabled, false);
+  assert.equal(enabled.user.disabledUntil, null);
+});
+
 test('demo groups use the signed-in user as their owner', async () => {
   await requestDemo('/auth/login', {
     method: 'POST',
@@ -60,7 +87,7 @@ test('demo groups use the signed-in user as their owner', async () => {
   });
   const created = await requestDemo('/channels', {
     method: 'POST',
-    body: { name: 'Alice 的项目组', memberUserIds: [3] }
+    body: { name: 'Alice 的项目组', kind: 'private', memberUserIds: [3] }
   });
   const members = await requestDemo(`/channels/${created.channel.id}/members`);
 
@@ -69,7 +96,71 @@ test('demo groups use the signed-in user as their owner', async () => {
   assert.equal(created.channel.ownerDisplayName, 'Alice');
 });
 
+test('demo public groups can be created, discovered and joined', async () => {
+  const created = await requestDemo('/channels', {
+    method: 'POST',
+    body: { name: '公开演示群', kind: 'public', memberUserIds: [] }
+  });
+  const beforeJoin = await requestDemo('/bootstrap');
+  const discoverable = beforeJoin.channels.find((channel) => channel.id === 4);
+  const joined = await requestDemo('/channels/4/join', { method: 'POST' });
+
+  assert.equal(created.channel.kind, 'public');
+  assert.equal(discoverable.isMember, false);
+  assert.equal(joined.channel.isMember, true);
+  assert.equal(joined.channel.memberCount, 3);
+
+  await assert.rejects(
+    requestDemo('/channels/2/join', { method: 'POST' }),
+    /公开群组不存在/
+  );
+});
+
 test('demo room socket echoes sent messages through the real-time contract', async () => {
+  const frames = [];
+  const inboxFrames = [];
+  const inboxSocket = connectDemoInboxSocket({
+    onMessage(frame) {
+      inboxFrames.push(JSON.parse(frame));
+    },
+    onStatus() {}
+  });
+  let socket;
+  await new Promise((resolve) => {
+    socket = connectDemoRoomSocket({
+      kind: 'public',
+      roomId: 1,
+      onMessage(frame) {
+        frames.push(JSON.parse(frame));
+      },
+      onStatus(event) {
+        if (event.status === 'open') resolve();
+      }
+    });
+  });
+
+	  socket.send(JSON.stringify({
+	    type: 'send',
+	    content: '@alice 浏览器本地消息',
+	    attachment: null,
+	    mentionUserIds: [2]
+	  }));
+
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0].type, 'message');
+	  assert.equal(frames[0].message.content, '@alice 浏览器本地消息');
+	  assert.equal(frames[0].message.sender.id, 1);
+	  assert.deepEqual(frames[0].message.mentionUserIds, [2]);
+
+  const history = await requestDemo('/messages?kind=public&roomId=1');
+	  assert.equal(history.messages.at(-1).content, '@alice 浏览器本地消息');
+	  assert.equal(history.messages.at(-1).mentions[0].username, 'alice');
+  assert.deepEqual(inboxFrames, []);
+  socket.close();
+  inboxSocket.close();
+});
+
+test('demo room socket persists pin, unpin and pinned-message deletion', async () => {
   const frames = [];
   let socket;
   await new Promise((resolve) => {
@@ -85,15 +176,17 @@ test('demo room socket echoes sent messages through the real-time contract', asy
     });
   });
 
-  socket.send(JSON.stringify({ type: 'send', content: '浏览器本地消息', attachment: null }));
+  socket.send(JSON.stringify({ type: 'pin_message', messageId: 104 }));
+  assert.equal(frames.at(-1).type, 'message_pinned');
+  assert.equal((await requestDemo('/messages?kind=public&roomId=1')).pinnedMessage.id, 104);
 
-  assert.equal(frames.length, 1);
-  assert.equal(frames[0].type, 'message');
-  assert.equal(frames[0].message.content, '浏览器本地消息');
-  assert.equal(frames[0].message.sender.id, 1);
+  socket.send(JSON.stringify({ type: 'unpin_message', messageId: 104 }));
+  assert.equal(frames.at(-1).type, 'message_unpinned');
+  assert.equal((await requestDemo('/messages?kind=public&roomId=1')).pinnedMessage, null);
 
-  const history = await requestDemo('/messages?kind=public&roomId=1');
-  assert.equal(history.messages.at(-1).content, '浏览器本地消息');
+  socket.send(JSON.stringify({ type: 'pin_message', messageId: 103 }));
+  socket.send(JSON.stringify({ type: 'delete_message', messageId: 103 }));
+  assert.equal((await requestDemo('/messages?kind=public&roomId=1')).pinnedMessage, null);
   socket.close();
 });
 
@@ -124,7 +217,11 @@ test('Telegram replies increment the inbox unread projection', async () => {
   roomSocket.send(JSON.stringify({ type: 'send', content: 'Telegram 未读测试' }));
   await new Promise((resolve) => setTimeout(resolve, 720));
 
-  assert.equal(inboxFrames.at(-1).unreadCount, 1);
+	  assert.equal(inboxFrames.at(-1).unreadCount, 1);
+	  assert.equal(inboxFrames.at(-1).mentionUnreadCount, 1);
+	  assert.equal(inboxFrames.at(-1).replyToMe, true);
+	  assert.equal(inboxFrames.at(-1).mentionsMe, false);
+  assert.equal(inboxFrames.at(-1).room.name, 'Telegram 联动');
   roomSocket.close();
   inboxSocket.close();
 });

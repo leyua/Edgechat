@@ -11,6 +11,8 @@ import {
   storeDemoFile
 } from './state.js';
 
+import { demoMaintenanceReport } from './maintenance.ts';
+
 const DEMO_DELAY_MS = 90;
 
 function fail(message, status = 400) {
@@ -52,8 +54,8 @@ function bootstrapPayload() {
     channels: demoState.channels.map(projectDemoChannel),
     dms: demoState.dms.map(projectDemoDm),
     users: demoState.users
-      .filter((user) => Number(user.id) !== Number(demoState.session.userId) && !user.isDisabled)
       .map(projectDemoUser)
+      .filter((user) => Number(user.id) !== Number(demoState.session.userId) && !user.isDisabled)
   };
 }
 
@@ -94,6 +96,46 @@ function adminOverviewPayload() {
   };
 }
 
+function adminStoragePayload() {
+  return {
+    users: demoState.users.map((user) => ({
+      id: user.id,
+      username: user.username,
+      displayName: user.displayName,
+      isDeleted: false
+    })),
+    items: [
+      {
+        ownerKey: 'user:1',
+        ownerType: 'user',
+        ownerId: 1,
+        objectCount: 2,
+        bytes: 2734080,
+        latestUploadedAt: '2026-08-14T09:58:00.000Z'
+      },
+      {
+        ownerKey: 'user:3',
+        ownerType: 'user',
+        ownerId: 3,
+        objectCount: 1,
+        bytes: 8420,
+        latestUploadedAt: '2026-08-14T09:36:00.000Z'
+      },
+      {
+        ownerKey: 'system:telegram',
+        ownerType: 'telegram',
+        ownerId: null,
+        objectCount: 1,
+        bytes: 524288,
+        latestUploadedAt: '2026-08-14T09:50:00.000Z'
+      }
+    ],
+    scannedObjects: 4,
+    truncated: false,
+    cursor: null
+  };
+}
+
 function createInvite(body) {
   const maxUses = Number(body.maxUses || 1);
   const invite = {
@@ -129,12 +171,13 @@ function getChannelRoom(channel) {
 function createGroup(body) {
   const id = demoState.nextChannelId++;
   const ownerId = Number(demoState.session.userId);
+  const kind = String(body.kind || 'public').trim();
   const memberIds = [ownerId, ...(body.memberUserIds || []).map(Number)].filter(
     (userId, index, values) => values.indexOf(userId) === index
   );
   const channel = {
     id,
-    kind: 'private',
+    kind,
     name: String(body.name || '').trim(),
     description: '',
     avatarKey: '',
@@ -167,6 +210,8 @@ function createAdminUser(body) {
     avatarUrl: '',
     isAdmin: false,
     isDisabled: false,
+    isPermanentlyDisabled: false,
+    disabledUntil: null,
     createdAt: new Date().toISOString()
   };
   demoState.users.push(user);
@@ -191,6 +236,7 @@ export async function requestDemo(path, options = {}) {
       fail('请输入账号和密码');
     }
     const user = demoState.users.find((item) => item.username === body.username) || demoState.users[0];
+    if (projectDemoUser(user).isDisabled) fail('账号或密码错误', 401);
     demoState.session = sessionForUser(user);
     return { token: demoState.session.token, session: cloneDemo(demoState.session) };
   }
@@ -224,13 +270,14 @@ export async function requestDemo(path, options = {}) {
   }
   if (method === 'POST' && pathname === '/channels') {
     if (!String(body.name || '').trim()) fail('请输入群组名称');
+    if (!['public', 'private'].includes(String(body.kind || 'public').trim())) fail('群组类型无效');
     return { channel: createGroup(body) };
   }
 
   let match = pathname.match(/^\/channels\/(\d+)\/join$/);
   if (method === 'POST' && match) {
     const channel = findDemoChannel(match[1]);
-    if (!channel) fail('群组不存在', 404);
+    if (!channel || channel.kind !== 'public') fail('公开群组不存在', 404);
     if (!channel.memberIds.includes(demoState.session.userId)) {
       channel.memberIds.push(demoState.session.userId);
       channel.memberCount = channel.memberIds.length;
@@ -278,7 +325,9 @@ export async function requestDemo(path, options = {}) {
     const index = demoState.channels.findIndex((channel) => Number(channel.id) === channelId);
     if (index >= 0) {
       const [channel] = demoState.channels.splice(index, 1);
-      delete demoState.messages[roomKey(channel.kind, channel.id)];
+      const key = roomKey(channel.kind, channel.id);
+      delete demoState.messages[key];
+      delete demoState.pinnedMessages[key];
     }
     return { ok: true };
   }
@@ -287,15 +336,22 @@ export async function requestDemo(path, options = {}) {
     const kind = url.searchParams.get('kind');
     const roomId = url.searchParams.get('roomId');
     const before = Number(url.searchParams.get('before') || 0);
-    const allMessages = demoState.messages[roomKey(kind, roomId)] || [];
+    const key = roomKey(kind, roomId);
+    const allMessages = demoState.messages[key] || [];
     const filtered = before ? allMessages.filter((message) => Number(message.id) < before) : allMessages;
-    return { messages: cloneDemo(filtered.slice(-30)) };
+    return {
+      messages: cloneDemo(filtered.slice(-30)),
+      pinnedMessage: cloneDemo(demoState.pinnedMessages[key] || null)
+    };
   }
   if (method === 'POST' && pathname === '/messages/read') {
     const room = body.kind === 'dm'
       ? demoState.dms.find((dm) => Number(dm.id) === Number(body.roomId))
       : findDemoChannel(body.roomId);
-    if (room) room.unreadCount = 0;
+    if (room) {
+      room.unreadCount = 0;
+      room.mentionUnreadCount = 0;
+    }
     return { ok: true };
   }
   if (method === 'POST' && pathname === '/dm/open') {
@@ -329,6 +385,12 @@ export async function requestDemo(path, options = {}) {
   if (method === 'GET' && pathname === '/admin/overview') {
     return cloneDemo(adminOverviewPayload());
   }
+  if (method === 'GET' && pathname === '/admin/maintenance') {
+    return demoMaintenanceReport();
+  }
+  if (method === 'GET' && pathname === '/admin/storage/scan') {
+    return cloneDemo(adminStoragePayload());
+  }
   if (method === 'GET' && pathname === '/admin/users') {
     return { users: cloneDemo(demoState.users.map(projectDemoUser)) };
   }
@@ -347,7 +409,18 @@ export async function requestDemo(path, options = {}) {
     const user = findDemoUser(match[1]);
     if (!user) fail('用户不存在', 404);
     user.displayName = String(body.displayName || user.displayName);
-    user.isDisabled = Boolean(body.isDisabled);
+    if (typeof body.isDisabled === 'boolean') {
+      const durationMinutes = body.banDurationMinutes == null ? null : Number(body.banDurationMinutes);
+      if (body.isDisabled && durationMinutes !== null
+        && (!Number.isInteger(durationMinutes) || durationMinutes < 1)) {
+        fail('封禁时长必须是正整数分钟');
+      }
+      user.isPermanentlyDisabled = body.isDisabled && durationMinutes === null;
+      user.disabledUntil = body.isDisabled && durationMinutes !== null
+        ? new Date(Date.now() + durationMinutes * 60 * 1000).toISOString()
+        : null;
+      user.isDisabled = user.isPermanentlyDisabled || Boolean(user.disabledUntil);
+    }
     return { user: projectDemoUser(user) };
   }
   if (method === 'DELETE' && match) {

@@ -27,8 +27,22 @@ export function findDemoChannel(channelId) {
 
 export function projectDemoUser(user) {
   if (!user) return null;
-  const { id, username, displayName, avatarUrl, isDisabled, createdAt } = user;
-  return { id, username, displayName, avatarUrl, isDisabled, createdAt };
+  const { id, username, displayName, avatarUrl, createdAt } = user;
+  const isPermanentlyDisabled = Boolean(user.isPermanentlyDisabled ?? (user.isDisabled && !user.disabledUntil));
+  const disabledUntilTimestamp = Date.parse(user.disabledUntil || '');
+  const disabledUntil = Number.isFinite(disabledUntilTimestamp) && disabledUntilTimestamp > Date.now()
+    ? user.disabledUntil
+    : null;
+  return {
+    id,
+    username,
+    displayName,
+    avatarUrl,
+    isDisabled: isPermanentlyDisabled || Boolean(disabledUntil),
+    isPermanentlyDisabled,
+    disabledUntil,
+    createdAt
+  };
 }
 
 export function projectDemoChannel(channel) {
@@ -49,7 +63,8 @@ export function projectDemoDm(dm) {
     kind: 'dm',
     otherUser: projectDemoUser(dm.otherUser),
     lastMessageAt: dm.lastMessageAt,
-    unreadCount: dm.unreadCount
+    unreadCount: dm.unreadCount,
+		mentionUnreadCount: Number(dm.mentionUnreadCount || 0)
   };
 }
 
@@ -64,15 +79,46 @@ export function getDemoMembers(channel) {
     }));
 }
 
-export function createDemoMessage({ kind, roomId, content, attachment, sender }) {
-  const message = {
+export function createDemoMessage({
+	kind,
+	roomId,
+	content,
+	attachment,
+	sender,
+	mentionUserIds = [],
+	replyMessageId = null,
+}) {
+	const normalizedMentionUserIds = [...new Set(mentionUserIds.map(Number))];
+	const key = roomKey(kind, roomId);
+	const replyTarget = replyMessageId
+		? (demoState.messages[key] || []).find((item) => Number(item.id) === Number(replyMessageId))
+		: null;
+	const message = {
     id: demoState.nextMessageId++,
     content: String(content || ''),
     createdAt: new Date().toISOString(),
     sender: cloneDemo(sender),
-    attachment: attachment ? cloneDemo(attachment) : null
-  };
-  const key = roomKey(kind, roomId);
+    attachment: attachment ? cloneDemo(attachment) : null,
+    mentionUserIds: normalizedMentionUserIds,
+    mentions: normalizedMentionUserIds
+      .map((userId) => findDemoUser(userId))
+      .filter(Boolean)
+      .map((user) => ({
+        userId: Number(user.id),
+        username: user.username,
+        displayName: user.displayName
+					}))
+	};
+	if (replyTarget) {
+		message.replyToMessageId = Number(replyTarget.id);
+		message.replyTo = {
+			id: Number(replyTarget.id),
+			deleted: false,
+			content: replyTarget.content,
+			sender: cloneDemo(replyTarget.sender),
+			attachment: replyTarget.attachment ? cloneDemo(replyTarget.attachment) : null,
+		};
+	}
   demoState.messages[key] ||= [];
   demoState.messages[key].push(message);
 

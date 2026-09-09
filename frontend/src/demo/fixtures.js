@@ -1,5 +1,49 @@
 const FIXTURE_TIME = '2026-08-14T10:00:00.000Z';
 
+function createDemoVoiceDataUrl() {
+  const sampleRate = 8000;
+  const durationSeconds = 3.2;
+  const sampleCount = Math.round(sampleRate * durationSeconds);
+  const bytes = new Uint8Array(44 + sampleCount);
+  const view = new DataView(bytes.buffer);
+  const writeText = (offset, value) => {
+    for (let index = 0; index < value.length; index += 1) {
+      bytes[offset + index] = value.charCodeAt(index);
+    }
+  };
+
+  writeText(0, 'RIFF');
+  view.setUint32(4, 36 + sampleCount, true);
+  writeText(8, 'WAVE');
+  writeText(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate, true);
+  view.setUint16(32, 1, true);
+  view.setUint16(34, 8, true);
+  writeText(36, 'data');
+  view.setUint32(40, sampleCount, true);
+
+  // 生成轻柔且有起伏的短音频，便于在 demo 中真实验证播放、暂停与进度交互。
+  for (let index = 0; index < sampleCount; index += 1) {
+    const time = index / sampleRate;
+    const envelope = Math.sin(Math.PI * Math.min(time / 0.12, 1, (durationSeconds - time) / 0.18));
+    const modulation = Math.sin(2 * Math.PI * 2.4 * time) * 18;
+    const sample = Math.sin(2 * Math.PI * (176 + modulation) * time);
+    bytes[44 + index] = 128 + Math.round(sample * envelope * 24);
+  }
+
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return `data:audio/wav;base64,${btoa(binary)}`;
+}
+
+const DEMO_VOICE_URL = createDemoVoiceDataUrl();
+
 function internalSender(user) {
   return {
     id: user.id,
@@ -20,6 +64,8 @@ export function createDemoFixtures() {
       avatarUrl: '',
       isAdmin: true,
       isDisabled: false,
+      isPermanentlyDisabled: false,
+      disabledUntil: null,
       createdAt: '2026-05-18T08:00:00.000Z'
     },
     {
@@ -29,6 +75,8 @@ export function createDemoFixtures() {
       avatarUrl: '',
       isAdmin: false,
       isDisabled: false,
+      isPermanentlyDisabled: false,
+      disabledUntil: null,
       createdAt: '2026-06-02T09:30:00.000Z'
     },
     {
@@ -38,6 +86,8 @@ export function createDemoFixtures() {
       avatarUrl: '',
       isAdmin: false,
       isDisabled: false,
+      isPermanentlyDisabled: false,
+      disabledUntil: null,
       createdAt: '2026-06-12T03:20:00.000Z'
     },
     {
@@ -47,6 +97,8 @@ export function createDemoFixtures() {
       avatarUrl: '',
       isAdmin: false,
       isDisabled: false,
+      isPermanentlyDisabled: false,
+      disabledUntil: null,
       createdAt: '2026-07-01T13:10:00.000Z'
     },
     {
@@ -56,6 +108,8 @@ export function createDemoFixtures() {
       avatarUrl: '',
       isAdmin: false,
       isDisabled: true,
+      isPermanentlyDisabled: true,
+      disabledUntil: null,
       createdAt: '2026-07-20T05:45:00.000Z'
     }
   ];
@@ -97,6 +151,7 @@ export function createDemoFixtures() {
       memberIds: [1, 2, 3],
       lastMessageAt: '2026-08-14T09:35:00.000Z',
       unreadCount: 2,
+      mentionUnreadCount: 1,
       createdAt: '2026-07-10T10:00:00.000Z'
     },
     {
@@ -114,8 +169,9 @@ export function createDemoFixtures() {
       canManage: true,
       memberCount: 4,
       memberIds: [1, 2, 3, 4],
-      lastMessageAt: '2026-08-14T09:50:00.000Z',
-      unreadCount: 1,
+	      lastMessageAt: '2026-08-14T09:50:00.000Z',
+	      unreadCount: 1,
+	      mentionUnreadCount: 1,
       createdAt: '2026-07-18T12:00:00.000Z'
     },
     {
@@ -180,14 +236,30 @@ export function createDemoFixtures() {
           size: 8420
         }
       },
-      {
-        id: 104,
-        content: '所有演示操作都只保存在当前浏览器页面中。',
-        createdAt: '2026-08-14T09:58:00.000Z',
-        sender: internalSender(users[3]),
-        attachment: null
-      }
-    ],
+		{
+			id: 104,
+			content: '所有演示操作都只保存在当前浏览器页面中。',
+			createdAt: '2026-08-14T09:58:00.000Z',
+			sender: internalSender(users[3]),
+			attachment: null
+		},
+		{
+			id: 105,
+			content: '',
+			createdAt: '2026-08-14T10:01:00.000Z',
+			sender: internalSender(users[1]),
+				attachment: {
+					key: DEMO_VOICE_URL,
+					url: DEMO_VOICE_URL,
+					name: 'voice-demo.wav',
+					type: 'audio/wav',
+					size: 25644,
+					kind: 'voice',
+					durationMs: 3200,
+				waveform: [18, 30, 46, 72, 88, 64, 42, 28, 36, 58, 82, 94, 76, 54, 34, 22, 40, 68, 90, 74, 50, 32, 48, 78]
+			}
+		}
+	],
     'private:2': [
       {
         id: 111,
@@ -198,9 +270,11 @@ export function createDemoFixtures() {
       },
       {
         id: 112,
-        content: '收到，我会继续检查移动端消息列表。',
+        content: '@admin 收到，我会继续检查移动端消息列表。',
         createdAt: '2026-08-14T09:35:00.000Z',
         sender: internalSender(users[2]),
+        mentionUserIds: [1],
+        mentions: [{ userId: 1, username: 'admin', displayName: '演示管理员' }],
         attachment: null
       }
     ],
@@ -216,15 +290,23 @@ export function createDemoFixtures() {
         id: 122,
         content: 'Telegram 群里的回复也会回到同一个 EdgeChat 频道。',
         createdAt: '2026-08-14T09:50:00.000Z',
-        sender: {
+	        sender: {
           id: 'telegram:-1002345678901:alice',
           username: '',
           displayName: 'Telegram · Alice',
           avatarUrl: '',
           kind: 'external',
-          source: 'telegram'
-        },
-        attachment: null
+	          source: 'telegram'
+	        },
+	        replyToMessageId: 121,
+	        replyTo: {
+	          id: 121,
+	          deleted: false,
+	          content: '这条消息由 EdgeChat 发送，并同步到了 Telegram 群。',
+	          sender: internalSender(users[0]),
+	          attachment: null
+	        },
+	        attachment: null
       }
     ],
     'public:4': [
@@ -269,6 +351,9 @@ export function createDemoFixtures() {
     channels,
     dms,
     messages,
+    pinnedMessages: {
+      'public:1': messages['public:1'][1]
+    },
     files: new Map(),
     invites: [
       {

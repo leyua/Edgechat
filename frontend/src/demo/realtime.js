@@ -19,12 +19,27 @@ function publishInbox(kind, roomId, message, { incrementUnread = false } = {}) {
   if (room && incrementUnread) {
     room.unreadCount = Number(room.unreadCount || 0) + 1;
   }
+  const mentionsMe = (message.mentionUserIds || []).includes(Number(demoState.session.userId));
+  const replyToMe = message.replyTo?.sender?.kind !== 'external'
+    && Number(message.replyTo?.sender?.id) === Number(demoState.session.userId);
+  if (room && incrementUnread && (mentionsMe || replyToMe)) {
+    room.mentionUnreadCount = Number(room.mentionUnreadCount || 0) + 1;
+  }
   const payload = {
     type: 'room_message',
-    room: { kind, id: Number(roomId) },
+    room: {
+      kind,
+      id: Number(roomId),
+      name: kind === 'dm' ? room?.otherUser?.displayName : room?.name
+    },
     messageId: message.id,
     createdAt: message.createdAt,
-    unreadCount: Number(room?.unreadCount || 0)
+    unreadCount: Number(room?.unreadCount || 0),
+    mentionUnreadCount: Number(room?.mentionUnreadCount || 0),
+    mentionsMe,
+    replyToMe,
+    contentPreview: message.content,
+    sender: cloneDemo(message.sender)
   };
   for (const socket of inboxSockets) emit(socket, payload);
 }
@@ -65,19 +80,22 @@ function handleRoomFrame(socket, frame) {
       roomId: socket.roomId,
       content: payload.content,
       attachment: payload.attachment,
-      sender: currentSender()
+      sender: currentSender(),
+	      mentionUserIds: payload.mentionUserIds || [],
+	      replyMessageId: payload.replyMessageId || null
     });
     publishRoom(socket.kind, socket.roomId, { type: 'message', message: cloneDemo(message) });
-    publishInbox(socket.kind, socket.roomId, message);
 
     if (hasEnabledTelegramMapping(socket.kind, socket.roomId)) {
       globalThis.setTimeout(() => {
         const reply = createDemoMessage({
           kind: socket.kind,
           roomId: socket.roomId,
-          content: 'Telegram 已收到这条消息，并把群内回复同步回 EdgeChat。',
-          attachment: null,
-          sender: telegramSender()
+	        content: 'Telegram 已收到这条消息，并把群内回复同步回 EdgeChat。',
+	        attachment: null,
+	        sender: telegramSender(),
+	        mentionUserIds: [],
+	        replyMessageId: message.id
         });
         publishRoom(socket.kind, socket.roomId, { type: 'message', message: cloneDemo(reply) });
         publishInbox(socket.kind, socket.roomId, reply, { incrementUnread: true });
@@ -88,11 +106,41 @@ function handleRoomFrame(socket, frame) {
 
   if (payload.type === 'delete_message') {
     const key = roomKey(socket.kind, socket.roomId);
-    demoState.messages[key] = (demoState.messages[key] || []).filter(
-      (message) => Number(message.id) !== Number(payload.messageId)
-    );
+		demoState.messages[key] = (demoState.messages[key] || [])
+		  .filter((message) => Number(message.id) !== Number(payload.messageId))
+		  .map((message) => Number(message.replyToMessageId) === Number(payload.messageId)
+		    ? { ...message, replyTo: { id: Number(payload.messageId), deleted: true } }
+		    : message);
     publishRoom(socket.kind, socket.roomId, {
       type: 'message_deleted',
+      messageId: Number(payload.messageId)
+    });
+    if (Number(demoState.pinnedMessages[key]?.id) === Number(payload.messageId)) {
+      delete demoState.pinnedMessages[key];
+    }
+    return;
+  }
+
+  if (payload.type === 'pin_message' && socket.kind !== 'dm') {
+    const key = roomKey(socket.kind, socket.roomId);
+    const message = (demoState.messages[key] || []).find(
+      (item) => Number(item.id) === Number(payload.messageId)
+    );
+    if (!message) return;
+    demoState.pinnedMessages[key] = message;
+    publishRoom(socket.kind, socket.roomId, {
+      type: 'message_pinned',
+      message: cloneDemo(message)
+    });
+    return;
+  }
+
+  if (payload.type === 'unpin_message' && socket.kind !== 'dm') {
+    const key = roomKey(socket.kind, socket.roomId);
+    if (Number(demoState.pinnedMessages[key]?.id) !== Number(payload.messageId)) return;
+    delete demoState.pinnedMessages[key];
+    publishRoom(socket.kind, socket.roomId, {
+      type: 'message_unpinned',
       messageId: Number(payload.messageId)
     });
   }
